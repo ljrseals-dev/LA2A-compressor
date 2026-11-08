@@ -9,7 +9,7 @@ int main() {
     const float* in[1] = {x.data()}; float* out[1] = {y.data()}; e.process(in, out, int(fs), 1);
     std::printf("GR at end of 1 s burst: %.1f dB (python reference ~30 dB)\n", e.grDb());
     const float* in2[1] = {x.data() + int(fs)}; float* out2[1] = {y.data() + int(fs)}; e.process(in2, out2, int(fs * 8), 1);
-    std::printf("GR 8 s after burst: %.1f dB (python: still >1 dB; release too slow vs manual)\n", e.grDb());
+    std::printf("GR 8 s after burst: %.1f dB (python: ~0.2 dB; <1 dB near 5 s)\n", e.grDb());
     // flat response at PR=0
     for (double f : {30.0, 1000.0, 15000.0}) {
         la2a::Engine u; u.setParams(0, 0.0, false, false); u.prepare(fs);

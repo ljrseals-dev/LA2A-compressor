@@ -7,22 +7,24 @@
 
 namespace la2a {
 
-// EL panel + CdS cell. Both stages attack fast (manual p.2: ~10 us); release = fast stage + slow tail.
-// Illumination = 0.5*fast + 0.5*slow (HYPOTHESIS). Release constants are UNVERIFIED and, in GAIN terms,
-// do NOT yet meet the manual's ~60 ms / 0.5-5 s (see README "Known failures").
+// Two-exponential cell model in the dB (gain-reduction) domain. Manual p.2: attack ~10 us, ~60 ms for 50%
+// release, 0.5-5 s complete release. "Release" is read as GAIN recovery (dB domain). [HYPOTHESIS]
+// Both stages attack fast, so burst duration is NOT remembered (UA manual describes that memory; modeling it
+// would slow the attack and conflict with p.2). Constants/weights are one fit, UNVERIFIED.
 struct T4Cell {
-    double fa = 0, fr = 0, sa = 0, sr = 0, f = 0, s = 0;
+    double fa = 0, fr = 0, sa = 0, sr = 0, wf = 0.56, ws = 0.44, gf = 0, gs = 0;
     static double coef(double t, double fs) { return std::exp(-1.0 / (std::max(t, 1.0 / fs) * fs)); }
-    void prepare(double fs, double attack = 10e-6, double fastRel = 0.015, double slowRel = 2.5) {
-        // At 48 kHz one sample = 20.8 us, so the 10 us attack is clamped to one sample (effective ~40-60 us).
+    void prepare(double fs, double attack = 10e-6, double fastRel = 0.030, double slowRel = 2.0) {
+        // 10 us is below one sample at 48 kHz (20.8 us): clamped to one sample (effective ~40-60 us).
         fa = sa = coef(attack, fs); fr = coef(fastRel, fs); sr = coef(slowRel, fs); reset();
     }
-    void reset() { f = s = 0; }
-    double step(double light) {
-        double k = light > f ? fa : fr;  f = k * f + (1 - k) * light;
-        k = light > s ? sa : sr;         s = k * s + (1 - k) * light;
-        if (f < 1e-18) f = 0; if (s < 1e-18) s = 0;   // flush denormals
-        return 0.5 * f + 0.5 * s;
+    void reset() { gf = gs = 0; }
+    double step(double targetDb) {
+        double k = targetDb > gf ? fa : fr; gf = k * gf + (1 - k) * targetDb;
+        k = targetDb > gs ? sa : sr;        gs = k * gs + (1 - k) * targetDb;
+        if (gf < 1e-18) gf = 0;
+        if (gs < 1e-18) gs = 0;                           // flush denormals
+        return wf * gf + ws * gs;                         // weights sum to 1 -> steady state = target
     }
 };
 
@@ -47,18 +49,17 @@ public:
         for (int i = 0; i < n; ++i) {
             gain_ += smooth_ * (gainT_ - gain_); pr_ += smooth_ * (prT_ - pr_);
             const double K = 400.0 * pr_ * pr_ + 1e-9;           // quadratic taper is a guess [?]
-            double v[kMaxCh], light[kMaxCh], L[kMaxCh]; double worst = 0;
+            double v[kMaxCh], light[kMaxCh], gr[kMaxCh]; double worst = 0;
             for (int c = 0; c < nch; ++c) { v[c] = in[c][i]; light[c] = std::fabs(v[c]); } // EL responds to |V| (physics, p.4)
+            auto targetDb = [&](double l) { return 20.0 * std::log10(1.0 + K * (compress_ ? std::pow(l, gamma) : l)); };
+            // Smooth divider 1/(1+K*L^gamma) in dB; does NOT model the -30 dB breakaway / -20 dB knee (p.3). [HYPOTHESIS]
             if (link_ && nch > 1) {                              // terminals 6/7: shared control (p.5-6)
-                const double l = std::max(light[0], light[1]);
-                const double Ls = cell_[0].step(l); L[0] = L[1] = Ls;
-            } else for (int c = 0; c < nch; ++c) L[c] = cell_[c].step(light[c]);
+                gr[0] = gr[1] = cell_[0].step(targetDb(std::max(light[0], light[1])));
+            } else for (int c = 0; c < nch; ++c) gr[c] = cell_[c].step(targetDb(light[c]));
             for (int c = 0; c < nch; ++c) {
-                // Smooth 1/(1+K*L^gamma); does NOT model the -30 dB breakaway / -20 dB knee (p.3). [HYPOTHESIS]
-                const double att = 1.0 / (1.0 + K * (compress_ ? std::pow(L[c], gamma) : L[c]));
                 // Gain applied post-attenuation (makeup style); manual says "input level" (p.3). [?]
-                out[c][i] = static_cast<float>(v[c] * att * gain_);
-                worst = std::max(worst, -20.0 * std::log10(att));
+                out[c][i] = static_cast<float>(v[c] * std::pow(10.0, -gr[c] / 20.0) * gain_);
+                worst = std::max(worst, gr[c]);
             }
             grDb_ = worst;
         }
